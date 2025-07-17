@@ -14,23 +14,27 @@ st.title("Multi-Outlet Quantity Forecasting")
 # ------------------------------------------------------------------------------------
 
 def enforce_nonneg_int(series: pd.Series, how: str = "round") -> pd.Series:
-    """Return a non-negative integer Series from numeric input.
+    """Return a non-negative Series from numeric input. If 'none', returns float.
 
     Parameters
     ----------
     series : pd.Series
         Numeric values.
-    how : {"round","floor","ceil"}
-        Rounding rule applied before clipping.
+    how : {"round","floor","ceil", "none"}
+        Rounding rule applied before clipping. If "none", no rounding is done.
     """
+    # Always clip at 0
+    vals = np.clip(series, 0, None)
+
     if how == "floor":
-        vals = np.floor(series)
+        return pd.Series(np.floor(vals), index=series.index).astype(int)
     elif how == "ceil":
-        vals = np.ceil(series)
-    else:
-        vals = np.round(series)
-    vals = np.clip(vals, 0, None)
-    return pd.Series(vals.astype(int), index=series.index)
+        return pd.Series(np.ceil(vals), index=series.index).astype(int)
+    elif how == "round":
+        return pd.Series(np.round(vals), index=series.index).astype(int)
+    
+    # If 'none', just return the clipped float values
+    return pd.Series(vals, index=series.index).astype(float)
 
 
 def safe_parse_dates(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
@@ -226,8 +230,9 @@ def plot_train_valid_future(outlet_name: str,
         ax.axvline(last_valid_date + timedelta(hours=12), color='gray', linestyle=':', linewidth=1)
         ax.text(last_valid_date, ax.get_ylim()[1], ' Valid End', rotation=90, va='top', ha='right', fontsize=8, color='gray')
 
-    # Integer y-axis
-    ax.yaxis.get_major_locator().set_params(integer=True)
+    # Integer y-axis only if rounding is enabled
+    if rounding != 'none':
+        ax.yaxis.get_major_locator().set_params(integer=True)
     ax.set_ylim(bottom=0) # Ensure y-axis starts at 0
 
     ax.set_xlabel("Date")
@@ -291,7 +296,7 @@ with st.sidebar:
     horizon_days = st.number_input("Number of FUTURE days to forecast", min_value=1, max_value=365, value=7, help="Number of days to forecast into the future, beyond all known data.")
 
     st.header("4. Model & Display Options")
-    rounding_rule = st.selectbox("Rounding rule for forecasts", ["round","floor","ceil"], index=0)
+    rounding_rule = st.selectbox("Rounding rule for forecasts", ["round","floor","ceil", "none"], index=0, help="'none' will keep forecast values as decimals.")
     fill_strategy = st.selectbox("Missing date fill strategy", ["ffill","zero","nan"], index=0, help="'ffill' uses the last known value, 'zero' fills with 0.")
     auto_seasonality = st.checkbox("Enable Prophet seasonality if train history >= 30 days", value=True)
     show_int = st.checkbox("Show prediction uncertainty intervals", value=True)
@@ -379,7 +384,7 @@ if run_button:
         st.header("Download All Forecasts")
         all_df = pd.concat(all_results, ignore_index=True)
         # Final cleanup on dtypes
-        all_df['forecast_qty'] = enforce_nonneg_int(all_df['forecast_qty'], how='round')
+        all_df['forecast_qty'] = enforce_nonneg_int(all_df['forecast_qty'], how=rounding_rule)
         all_df['actual_qty'] = all_df['actual_qty'].fillna(-1).astype(int).replace(-1, pd.NA) # Preserve NaNs for future dates
         
         st.dataframe(all_df)
