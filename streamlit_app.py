@@ -5,9 +5,10 @@ from prophet import Prophet
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import timedelta
+import plotly.graph_objects as go
 
-st.set_page_config(page_title="Multi-Outlet Quantity Forecasting", layout="wide")
-st.title("Multi-Outlet Quantity Forecasting")
+st.set_page_config(page_title="Multi-Product Quantity Forecasting", layout="wide")
+st.title("Multi-Product Quantity Forecasting")
 
 # ------------------------------------------------------------------------------------
 # Utility functions
@@ -146,10 +147,8 @@ def calc_metrics(actual: pd.Series, pred: pd.Series):
 # ------------------------------------------------------------------------------------
 # Plotting
 # ------------------------------------------------------------------------------------
-import plotly.graph_objects as go
-
 def plotly_train_valid_future(
-    outlet_name: str,
+    item_name: str,
     daily: pd.DataFrame,
     train_df: pd.DataFrame,
     valid_df: pd.DataFrame,
@@ -186,7 +185,8 @@ def plotly_train_valid_future(
 
     daily_valid = daily[daily['ds'].isin(valid_pred['ds'])]
     if not daily_valid.empty and not valid_pred.empty:
-        preds_for_metrics = valid_pred.set_index('ds').loc[daily_valid['ds'],'yhat_display']
+        # CORRECTED: Calculate metrics on raw 'yhat' before rounding
+        preds_for_metrics = valid_pred.set_index('ds').loc[daily_valid['ds'],'yhat']
         metrics = calc_metrics(daily_valid['y'], preds_for_metrics)
     else:
         metrics = {k: np.nan for k in ["MAE","RMSE","sMAPE","MAPE"]}
@@ -259,7 +259,7 @@ def plotly_train_valid_future(
         ))
 
     fig.update_layout(
-        title=f"Forecast for: {outlet_name}",
+        title=f"Forecast for: {item_name}",
         xaxis_title="Date",
         yaxis_title="Quantity Sold",
         yaxis=dict(rangemode='tozero', tickformat=',d' if rounding != 'none' else ''),
@@ -289,112 +289,6 @@ def plotly_train_valid_future(
 
     return fig, metrics, train_fit, valid_pred, fcst_fut
 
-def plot_train_valid_future(outlet_name: str,
-                            daily: pd.DataFrame,
-                            train_df: pd.DataFrame,
-                            valid_df: pd.DataFrame,
-                            fcst: pd.DataFrame,
-                            rounding: str,
-                            show_int: bool = True):
-    """Create a custom chart showing actuals, fitted train, validation preds, and future preds."""
-    fcst = fcst.copy()
-    fcst['ds'] = pd.to_datetime(fcst['ds'])
-
-    # Determine boundaries
-    last_train_date = train_df['ds'].max() if not train_df.empty else None
-    last_valid_date = valid_df['ds'].max() if not valid_df.empty else last_train_date
-
-    # Extract yhat aligned to history
-    fcst_hist = fcst[fcst['ds'] <= daily['ds'].max()].copy()
-    fcst_hist = fcst_hist.merge(daily[['ds','y']], on='ds', how='right', suffixes=("","_drop"))
-
-    # Train fit preds
-    train_mask = fcst_hist['ds'] <= last_train_date if last_train_date is not None else np.array([False]*len(fcst_hist))
-    train_fit = fcst_hist.loc[train_mask, ['ds','yhat','yhat_lower','yhat_upper']].copy()
-
-    # Validation preds
-    valid_mask = (fcst_hist['ds'] > last_train_date) & (fcst_hist['ds'] <= last_valid_date) if last_valid_date is not None and last_train_date is not None else np.array([False]*len(fcst_hist))
-    valid_pred = fcst_hist.loc[valid_mask, ['ds','yhat','yhat_lower','yhat_upper']].copy()
-
-    # Future preds (after full history)
-    fcst_fut = fcst[fcst['ds'] > daily['ds'].max()].copy()
-
-    # Enforce integer predictions for display
-    train_fit['yhat_display'] = enforce_nonneg_int(train_fit['yhat'], how=rounding)
-    valid_pred['yhat_display'] = enforce_nonneg_int(valid_pred['yhat'], how=rounding)
-    fcst_fut['yhat_display'] = enforce_nonneg_int(fcst_fut['yhat'], how=rounding)
-
-    # Metrics on validation window using integer preds
-    daily_valid = daily[daily['ds'].isin(valid_pred['ds'])]
-    
-    # Ensure we only calculate metrics if there is validation data
-    if not daily_valid.empty and not valid_pred.empty:
-        # Align predictions with actuals for metrics calculation
-        preds_for_metrics = valid_pred.set_index('ds').loc[daily_valid['ds'],'yhat_display']
-        metrics = calc_metrics(daily_valid['y'], preds_for_metrics)
-    else:
-        metrics = {k: np.nan for k in ["MAE","RMSE","sMAPE","MAPE"]}
-
-
-    fig, ax = plt.subplots(figsize=(10,4))
-
-    # Actuals (blue)
-    ax.plot(daily['ds'], daily['y'], marker='o', linestyle='-', label='Actual', color='tab:blue', zorder=5)
-
-    # Train fit (orange dashed)
-    if not train_fit.empty:
-        ax.plot(train_fit['ds'], train_fit['yhat_display'], linestyle='--', label='Train Fit', color='tab:orange', zorder=10)
-
-    # Validation preds (green solid)
-    if not valid_pred.empty:
-        ax.plot(valid_pred['ds'], valid_pred['yhat_display'], linestyle='-', marker='s', label='Validation Pred', color='tab:green', zorder=10)
-
-    # Future forecast (purple X)
-    if not fcst_fut.empty:
-        ax.plot(fcst_fut['ds'], fcst_fut['yhat_display'], linestyle='-', marker='x', label='Future Forecast', color='tab:purple', zorder=10)
-
-    # Uncertainty band across validation + future
-    if show_int:
-        int_df = pd.concat([valid_pred[['ds','yhat_lower','yhat_upper']], fcst_fut[['ds','yhat_lower','yhat_upper']]])
-        if not int_df.empty:
-            # Enforce non-negativity on uncertainty bounds for plotting
-            yhat_lower_display = enforce_nonneg_int(int_df['yhat_lower'], how='floor')
-            yhat_upper_display = enforce_nonneg_int(int_df['yhat_upper'], how='ceil')
-            ax.fill_between(int_df['ds'], yhat_lower_display, yhat_upper_display, color='tab:blue', alpha=0.1, label='Uncertainty', zorder=1)
-
-    # Vertical lines marking boundaries
-    if last_train_date is not None:
-        ax.axvline(last_train_date + timedelta(hours=12), color='gray', linestyle=':', linewidth=1)
-        ax.text(last_train_date, ax.get_ylim()[1], ' Train End', rotation=90, va='top', ha='right', fontsize=8, color='gray')
-    if last_valid_date is not None and last_valid_date != last_train_date:
-        ax.axvline(last_valid_date + timedelta(hours=12), color='gray', linestyle=':', linewidth=1)
-        ax.text(last_valid_date, ax.get_ylim()[1], ' Valid End', rotation=90, va='top', ha='right', fontsize=8, color='gray')
-
-    # Integer y-axis only if rounding is enabled
-    if rounding != 'none':
-        ax.yaxis.get_major_locator().set_params(integer=True)
-    ax.set_ylim(bottom=0) # Ensure y-axis starts at 0
-
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Quantity Sold")
-    ax.set_title(f"Forecast for: {outlet_name}")
-    ax.legend(loc='best')
-    ax.grid(True, which='major', axis='y', alpha=0.3)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
-    fig.autofmt_xdate()
-
-    # Metrics annotation
-    txt = (f"Validation Metrics:\n"
-           f"MAE: {metrics.get('MAE', 'N/A'):.2f}\n"
-           f"RMSE: {metrics.get('RMSE', 'N/A'):.2f}\n"
-           f"sMAPE: {metrics.get('sMAPE', 'N/A'):.1f}%")
-    ax.text(1.02, 0.5, txt, transform=ax.transAxes, va='center', ha='left', fontsize=9,
-            bbox=dict(boxstyle='round', facecolor='white', alpha=0.7, edgecolor='gray'))
-    
-    plt.tight_layout(rect=[0, 0, 0.85, 1]) # Adjust layout to make space for metrics box
-
-    return fig, metrics, train_fit, valid_pred, fcst_fut
-
 
 # ------------------------------------------------------------------------------------
 # Sidebar / Controls
@@ -418,24 +312,53 @@ with st.sidebar:
     # Try to auto-detect columns
     column_options = raw.columns.tolist()
     outlet_col_index = 0
-    date_col_index = 1
-    qty_col_index = 2
+    product_col_index = 1
+    date_col_index = 2
+    qty_col_index = 3
+    
     for i, col in enumerate(column_options):
         col_lower = col.lower()
         if 'outlet' in col_lower: outlet_col_index = i
+        if 'product' in col_lower: product_col_index = i
         if 'date' in col_lower: date_col_index = i
-        if 'qty' in col_lower or 'quant' in col_lower: qty_col_index = i
+        if 'qty' in col_lower or 'quant' in col_lower or 'sold' in col_lower: qty_col_index = i
 
     outlet_column = st.selectbox("Select the outlet column:", column_options, index=outlet_col_index)
+    product_column = st.selectbox("Select the product column:", column_options, index=product_col_index)
     date_column = st.selectbox("Select the date column:", column_options, index=date_col_index)
     value_column = st.selectbox("Select the quantity column:", column_options, index=qty_col_index)
 
-    st.header("3. Set Forecast Windows")
+    st.header("3. Forecasting Scope")
+    forecast_level = st.selectbox(
+        "Forecast level:", 
+        ["Product (across all outlets)", "Product by Outlet", "Outlet (all products combined)"],
+        index=0,
+        help="Choose whether to forecast by product, by product-outlet combination, or by outlet"
+    )
+    
+    # Filter options
+    st.subheader("Filters")
+    available_outlets = sorted(raw[outlet_column].dropna().unique())
+    available_products = sorted(raw[product_column].dropna().unique())
+    
+    selected_outlets = st.multiselect(
+        "Select outlets (leave empty for all):", 
+        available_outlets,
+        help="Filter to specific outlets. Leave empty to include all outlets."
+    )
+    
+    selected_products = st.multiselect(
+        "Select products (leave empty for all):", 
+        available_products,
+        help="Filter to specific products. Leave empty to include all products."
+    )
+
+    st.header("4. Set Forecast Windows")
     train_days = st.number_input("Number of TRAIN days", min_value=2, max_value=1000, value=7, help="Number of days at the end of the history to use for model training.")
     valid_days = st.number_input("Number of VALIDATION days", min_value=0, max_value=1000, value=2, help="Number of days immediately after the training period to test the model's accuracy.")
     horizon_days = st.number_input("Number of FUTURE days to forecast", min_value=1, max_value=365, value=7, help="Number of days to forecast into the future, beyond all known data.")
 
-    st.header("4. Model & Display Options")
+    st.header("5. Model & Display Options")
     rounding_rule = st.selectbox("Rounding rule for forecasts", ["round","floor","ceil", "none"], index=0, help="'none' will keep forecast values as decimals.")
     fill_strategy = st.selectbox("Missing date fill strategy", ["ffill","zero","nan"], index=0, help="'ffill' uses the last known value, 'zero' fills with 0.")
     auto_seasonality = st.checkbox("Enable Prophet seasonality if train history >= 30 days", value=True)
@@ -445,26 +368,71 @@ with st.sidebar:
 
 
 if run_button:
-    outlets = raw[outlet_column].dropna().unique()
-    st.write(f"Found {len(outlets)} unique outlets. Generating forecasts...")
+    # Apply filters
+    filtered_data = raw.copy()
+    if selected_outlets:
+        filtered_data = filtered_data[filtered_data[outlet_column].isin(selected_outlets)]
+    if selected_products:
+        filtered_data = filtered_data[filtered_data[product_column].isin(selected_products)]
+    
+    if filtered_data.empty:
+        st.error("No data remaining after applying filters.")
+        st.stop()
+    
+    # Determine grouping based on forecast level
+    if forecast_level == "Product (across all outlets)":
+        # Group by product only, sum across all outlets
+        group_cols = [product_column]
+        group_label = "Product"
+    elif forecast_level == "Product by Outlet":
+        # Group by both product and outlet
+        group_cols = [product_column, outlet_column]
+        group_label = "Product-Outlet"
+    else:  # "Outlet (all products combined)"
+        # Group by outlet only, sum across all products
+        group_cols = [outlet_column]
+        group_label = "Outlet"
+    
+    # Get unique combinations
+    unique_groups = filtered_data[group_cols].drop_duplicates()
+    
+    st.write(f"Found {len(unique_groups)} unique {group_label.lower()} combinations. Generating forecasts...")
 
     all_results = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
-    for outlet in outlets:
+    # CORRECTED: Use enumerate for a reliable progress counter
+    for i, (idx, row) in enumerate(unique_groups.iterrows()):
+        # Create filter condition for this group
+        filter_condition = True
+        group_name_parts = []
+        
+        for col in group_cols:
+            filter_condition = filter_condition & (filtered_data[col] == row[col])
+            group_name_parts.append(f"{col}: {row[col]}")
+        
+        group_name = " | ".join(group_name_parts)
+        
+        # Update progress
+        progress = (i + 1) / len(unique_groups)
+        progress_bar.progress(progress)
+        status_text.text(f"Processing {group_name}...")
+        
         with st.container():
-            st.subheader(f"Forecast for: {outlet}")
+            st.subheader(f"Forecast for: {group_name}")
 
-            df_o = raw[raw[outlet_column] == outlet][[date_column, value_column]].copy()
-            if df_o.empty:
-                st.warning("No data for this outlet.")
+            df_group = filtered_data[filter_condition][[date_column, value_column]].copy()
+            if df_group.empty:
+                st.warning("No data for this group.")
                 continue
 
             # --- Data Cleaning and Preparation ---
-            df_o = safe_parse_dates(df_o, date_column)
-            if df_o.empty:
+            df_group = safe_parse_dates(df_group, date_column)
+            if df_group.empty:
                 st.warning("All dates failed to parse; skipping.")
                 continue
-            daily = aggregate_to_daily(df_o, date_column, value_column)
+            daily = aggregate_to_daily(df_group, date_column, value_column)
             daily = reindex_missing_dates(daily, date_column, value_column, fill_strategy=fill_strategy)
             daily = daily.rename(columns={date_column: 'ds', value_column: 'y'})
 
@@ -486,12 +454,12 @@ if run_button:
             try:
                 model, fcst = fit_and_forecast_prophet(train_df, valid_days=len(valid_df), horizon_days=horizon_days, seasonality_ok=seasonality_ok)
             except Exception as e:
-                st.error(f"Prophet model failed to fit for {outlet}: {e}")
+                st.error(f"Prophet model failed to fit for {group_name}: {e}")
                 continue
 
             # --- Plotting and Metrics ---
             fig, metrics, train_fit, valid_pred, fcst_fut = plotly_train_valid_future(
-                outlet_name=outlet,
+                item_name=group_name,
                 daily=daily,
                 train_df=train_df,
                 valid_df=valid_df,
@@ -500,6 +468,7 @@ if run_button:
                 show_int=show_int
             )
             st.plotly_chart(fig, use_container_width=True)
+            
             # --- Prepare Results for Download ---
             actuals_tbl = daily.rename(columns={'y': 'actual_qty'})
             
@@ -516,18 +485,32 @@ if run_button:
             
             # Merge with actuals
             final_tbl = pd.merge(res_tbl, actuals_tbl, on='ds', how='left')
-            final_tbl.insert(0, 'outlet', outlet)
+            
+            # Add group identifier columns
+            for col in group_cols:
+                final_tbl[col] = row[col]
+            
             all_results.append(final_tbl)
+
+    # Clear progress indicators
+    progress_bar.empty()
+    status_text.empty()
 
     if all_results:
         st.header("Download All Forecasts")
         all_df = pd.concat(all_results, ignore_index=True)
+        
         # Final cleanup on dtypes
         all_df['forecast_qty'] = enforce_nonneg_int(all_df['forecast_qty'], how=rounding_rule)
         all_df['actual_qty'] = all_df['actual_qty'].fillna(-1).astype(int).replace(-1, pd.NA) # Preserve NaNs for future dates
         
+        # Reorder columns to put group identifiers first
+        id_cols = [col for col in group_cols if col in all_df.columns]
+        other_cols = [col for col in all_df.columns if col not in id_cols]
+        all_df = all_df[id_cols + other_cols]
+        
         st.dataframe(all_df)
         
         csv_bytes = all_df.to_csv(index=False).encode('utf-8')
-        st.download_button("Download Forecasts as CSV", data=csv_bytes, file_name="multi_outlet_forecasts.csv", mime="text/csv")
-
+        filename = f"multi_{group_label.lower().replace('-', '_')}_forecasts.csv"
+        st.download_button("Download Forecasts as CSV", data=csv_bytes, file_name=filename, mime="text/csv")
