@@ -12,9 +12,8 @@ st.title("Multi-Outlet Quantity Forecasting")
 # ------------------------------------------------------------------------------------
 # Utility functions
 # ------------------------------------------------------------------------------------
-
 def enforce_nonneg_int(series: pd.Series, how: str = "round") -> pd.Series:
-    """Return a non-negative Series from numeric input. If 'none', returns float.
+    """Return a non-negative integer Series from numeric input. NaN -> 0.
 
     Parameters
     ----------
@@ -23,18 +22,17 @@ def enforce_nonneg_int(series: pd.Series, how: str = "round") -> pd.Series:
     how : {"round","floor","ceil", "none"}
         Rounding rule applied before clipping. If "none", no rounding is done.
     """
-    # Always clip at 0
     vals = np.clip(series, 0, None)
-
     if how == "floor":
-        return pd.Series(np.floor(vals), index=series.index).astype(int)
+        arr = np.floor(vals)
     elif how == "ceil":
-        return pd.Series(np.ceil(vals), index=series.index).astype(int)
+        arr = np.ceil(vals)
     elif how == "round":
-        return pd.Series(np.round(vals), index=series.index).astype(int)
-    
-    # If 'none', just return the clipped float values
-    return pd.Series(vals, index=series.index).astype(float)
+        arr = np.round(vals)
+    else:
+        return pd.Series(vals, index=series.index).astype(float)
+    # Заполняем NaN нулями перед преобразованием в int
+    return pd.Series(arr, index=series.index).fillna(0).astype(int)
 
 
 def safe_parse_dates(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
