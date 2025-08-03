@@ -146,6 +146,148 @@ def calc_metrics(actual: pd.Series, pred: pd.Series):
 # ------------------------------------------------------------------------------------
 # Plotting
 # ------------------------------------------------------------------------------------
+import plotly.graph_objects as go
+
+def plotly_train_valid_future(
+    outlet_name: str,
+    daily: pd.DataFrame,
+    train_df: pd.DataFrame,
+    valid_df: pd.DataFrame,
+    fcst: pd.DataFrame,
+    rounding: str,
+    show_int: bool = True,
+):
+    """Plot interactive train/valid/future forecast using Plotly."""
+
+    fcst = fcst.copy()
+    fcst['ds'] = pd.to_datetime(fcst['ds'])
+
+    last_train_date = train_df['ds'].max() if not train_df.empty else None
+    last_valid_date = valid_df['ds'].max() if not valid_df.empty else last_train_date
+
+    fcst_hist = fcst[fcst['ds'] <= daily['ds'].max()].copy()
+    fcst_hist = fcst_hist.merge(daily[['ds','y']], on='ds', how='right', suffixes=("","_drop"))
+
+    # Train fit preds
+    train_mask = fcst_hist['ds'] <= last_train_date if last_train_date is not None else np.array([False]*len(fcst_hist))
+    train_fit = fcst_hist.loc[train_mask, ['ds','yhat','yhat_lower','yhat_upper']].copy()
+
+    # Validation preds
+    valid_mask = (fcst_hist['ds'] > last_train_date) & (fcst_hist['ds'] <= last_valid_date) if last_valid_date is not None and last_train_date is not None else np.array([False]*len(fcst_hist))
+    valid_pred = fcst_hist.loc[valid_mask, ['ds','yhat','yhat_lower','yhat_upper']].copy()
+
+    # Future preds (after full history)
+    fcst_fut = fcst[fcst['ds'] > daily['ds'].max()].copy()
+
+    # Enforce integer predictions for display
+    train_fit['yhat_display'] = enforce_nonneg_int(train_fit['yhat'], how=rounding)
+    valid_pred['yhat_display'] = enforce_nonneg_int(valid_pred['yhat'], how=rounding)
+    fcst_fut['yhat_display'] = enforce_nonneg_int(fcst_fut['yhat'], how=rounding)
+
+    daily_valid = daily[daily['ds'].isin(valid_pred['ds'])]
+    if not daily_valid.empty and not valid_pred.empty:
+        preds_for_metrics = valid_pred.set_index('ds').loc[daily_valid['ds'],'yhat_display']
+        metrics = calc_metrics(daily_valid['y'], preds_for_metrics)
+    else:
+        metrics = {k: np.nan for k in ["MAE","RMSE","sMAPE","MAPE"]}
+
+    # === PLOTLY CHART ===
+    fig = go.Figure()
+
+    # Actuals
+    fig.add_trace(go.Scatter(
+        x=daily['ds'], y=daily['y'], mode='lines+markers', name='Actual',
+        line=dict(color='blue'), marker=dict(symbol='circle', size=6)
+    ))
+
+    # Train Fit
+    if not train_fit.empty:
+        fig.add_trace(go.Scatter(
+            x=train_fit['ds'], y=train_fit['yhat_display'], mode='lines+markers', name='Train Fit',
+            line=dict(color='orange', dash='dash'), marker=dict(symbol='diamond', size=6)
+        ))
+
+    # Validation Prediction
+    if not valid_pred.empty:
+        fig.add_trace(go.Scatter(
+            x=valid_pred['ds'], y=valid_pred['yhat_display'], mode='lines+markers', name='Validation Pred',
+            line=dict(color='green', width=3), marker=dict(symbol='square', size=6)
+        ))
+
+    # Future Forecast
+    if not fcst_fut.empty:
+        fig.add_trace(go.Scatter(
+            x=fcst_fut['ds'], y=fcst_fut['yhat_display'], mode='lines+markers', name='Future Forecast',
+            line=dict(color='purple', width=3), marker=dict(symbol='x', size=7)
+        ))
+
+    # Uncertainty
+    if show_int:
+        int_df = pd.concat([valid_pred[['ds','yhat_lower','yhat_upper']], fcst_fut[['ds','yhat_lower','yhat_upper']]])
+        if not int_df.empty:
+            yhat_lower_display = enforce_nonneg_int(int_df['yhat_lower'], how='floor')
+            yhat_upper_display = enforce_nonneg_int(int_df['yhat_upper'], how='ceil')
+            fig.add_traces([
+                go.Scatter(
+                    x=int_df['ds'], y=yhat_upper_display, mode='lines', name='Upper Bound',
+                    line=dict(width=0), marker=dict(color='rgba(0,0,0,0)'),
+                    showlegend=False
+                ),
+                go.Scatter(
+                    x=int_df['ds'], y=yhat_lower_display, mode='lines', name='Lower Bound',
+                    fill='tonexty', fillcolor='rgba(100,100,200,0.1)',
+                    line=dict(width=0), marker=dict(color='rgba(0,0,0,0)'),
+                    showlegend=False
+                ),
+            ])
+
+    # Vertical lines
+    annos = []
+    if last_train_date is not None:
+        fig.add_vline(x=last_train_date, line=dict(color='gray', dash='dot'))
+        annos.append(dict(
+            x=last_train_date, y=max(daily['y']),
+            xref='x', yref='y',
+            text='Train End', showarrow=True, arrowhead=1, ax=20, ay=-40, font=dict(size=10, color='gray')
+        ))
+    if last_valid_date is not None and last_valid_date != last_train_date:
+        fig.add_vline(x=last_valid_date, line=dict(color='gray', dash='dot'))
+        annos.append(dict(
+            x=last_valid_date, y=max(daily['y']),
+            xref='x', yref='y',
+            text='Valid End', showarrow=True, arrowhead=1, ax=20, ay=-20, font=dict(size=10, color='gray')
+        ))
+
+    fig.update_layout(
+        title=f"Forecast for: {outlet_name}",
+        xaxis_title="Date",
+        yaxis_title="Quantity Sold",
+        yaxis=dict(rangemode='tozero', tickformat=',d' if rounding != 'none' else ''),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+        hovermode='x unified',
+        annotations=annos,
+        margin=dict(r=160),
+        width=950, height=420,
+    )
+
+    # Validation metrics as annotation (outside plot)
+    metrics_txt = (
+        f"Validation Metrics:<br>"
+        f"MAE: {metrics.get('MAE', 'N/A'):.2f}<br>"
+        f"RMSE: {metrics.get('RMSE', 'N/A'):.2f}<br>"
+        f"sMAPE: {metrics.get('sMAPE', 'N/A'):.1f}%"
+    )
+    fig.add_annotation(
+        xref="paper", yref="paper",
+        x=1.13, y=0.5,
+        showarrow=False,
+        align='left',
+        text=metrics_txt,
+        font=dict(size=12, color='black'),
+        bordercolor='gray', borderpad=8, bgcolor="white", opacity=0.85
+    )
+
+    return fig, metrics, train_fit, valid_pred, fcst_fut
 
 def plot_train_valid_future(outlet_name: str,
                             daily: pd.DataFrame,
@@ -348,7 +490,7 @@ if run_button:
                 continue
 
             # --- Plotting and Metrics ---
-            fig, metrics, train_fit, valid_pred, fcst_fut = plot_train_valid_future(
+            fig, metrics, train_fit, valid_pred, fcst_fut = plotly_train_valid_future(
                 outlet_name=outlet,
                 daily=daily,
                 train_df=train_df,
@@ -357,8 +499,7 @@ if run_button:
                 rounding=rounding_rule,
                 show_int=show_int
             )
-            st.pyplot(fig, clear_figure=True)
-
+            st.plotly_chart(fig, use_container_width=True)
             # --- Prepare Results for Download ---
             actuals_tbl = daily.rename(columns={'y': 'actual_qty'})
             
