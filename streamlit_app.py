@@ -188,6 +188,12 @@ with st.sidebar:
     fill_strategy = st.selectbox("Missing date fill strategy", ["ffill","zero","nan"], 0)
     auto_seasonality = st.checkbox("Enable Prophet seasonality if train history >= 30 days", True)
     
+    generate_csv_only = st.checkbox(
+        "Generate CSV only (skip plots)", 
+        False, 
+        help="If checked, the app will not display individual plots and metrics, only the final downloadable CSV table. This is faster for many groups."
+    )
+    
     run_button = st.button("Run All Forecasts", type="primary")
 
 # ------------------------------------------------------------------------------------
@@ -209,9 +215,27 @@ if run_button:
     unique_groups = filtered_data[group_cols].drop_duplicates().reset_index(drop=True)
     all_results_for_csv = []
     
-    st.markdown("---")
+    # --- MODIFICATION START: Added progress bar logic ---
+    total_groups = len(unique_groups)
+    if total_groups == 0:
+        st.warning("No data groups found for the selected filters. Please adjust your filters.")
+        st.stop()
+
+    if not generate_csv_only:
+        st.markdown("---")
+    
+    # Create a container for the progress bar that we can update
+    progress_container = st.empty()
     
     for i, row in unique_groups.iterrows():
+        # Update progress bar
+        progress_value = (i + 1) / total_groups
+        group_name_parts_for_bar = [f"{row[col]}" for col in group_cols]
+        group_name_for_bar = " | ".join(group_name_parts_for_bar)
+        progress_text = f"Processing group {i + 1} of {total_groups}: {group_name_for_bar}"
+        progress_container.progress(progress_value, text=progress_text)
+        # --- MODIFICATION END ---
+
         filter_condition = pd.Series(True, index=filtered_data.index)
         group_name_parts = []
         for col in group_cols:
@@ -219,7 +243,8 @@ if run_button:
             group_name_parts.append(f"{row[col]}")
         group_name = " | ".join(group_name_parts)
         
-        st.subheader(f"Forecast for Group: {group_name}")
+        if not generate_csv_only:
+            st.subheader(f"Forecast for Group: {group_name}")
         
         forecasts_for_group = {}
         
@@ -251,41 +276,68 @@ if run_button:
 
         if forecasts_for_group:
             fig, metrics_df = plotly_multi_target_forecast(group_name, forecasts_for_group, rounding_rule)
-            st.plotly_chart(fig, use_container_width=True)
             
-            st.write("Validation Metrics:")
-            st.dataframe(metrics_df, use_container_width=True)
+            if not generate_csv_only:
+                st.plotly_chart(fig, use_container_width=True)
+                st.write("Validation Metrics:")
+                st.dataframe(metrics_df, use_container_width=True)
             
-            for metric, data in forecasts_for_group.items():
-                fcst_export = data['fcst'].copy()
-                
-                # ***** THIS IS THE CORRECTED LINE *****
-                fcst_export['forecast_qty'] = enforce_nonneg_int(fcst_export['yhat'], rounding_rule)
-                
-                fcst_export = fcst_export[['ds', 'forecast_qty']]
-                
-                actuals_export = data['daily'].rename(columns={'y': 'actual_qty'})
-                
-                final_tbl = pd.merge(fcst_export, actuals_export, on='ds', how='left')
-                final_tbl['target_metric'] = metric
+            base_df = None
+            if forecasts_for_group:
+                first_metric = next(iter(forecasts_for_group))
+                base_df = forecasts_for_group[first_metric]['fcst'][['ds']].copy()
+
+            if base_df is not None:
                 for col in group_cols:
-                    final_tbl[col] = row[col]
-                all_results_for_csv.append(final_tbl)
+                    base_df[col] = row[col]
+
+                for metric_name, data in forecasts_for_group.items():
+                    actuals_df = data['daily'].rename(columns={'y': f'{metric_name}_actual'})[['ds', f'{metric_name}_actual']]
+                    forecast_df = data['fcst'][['ds', 'yhat']].copy()
+                    forecast_df[f'{metric_name}_forecast'] = enforce_nonneg_int(forecast_df['yhat'], rounding_rule)
+                    base_df = pd.merge(base_df, actuals_df, on='ds', how='left')
+                    base_df = pd.merge(base_df, forecast_df[['ds', f'{metric_name}_forecast']], on='ds', how='left')
+                
+                all_results_for_csv.append(base_df)
+            
         else:
-            st.warning("No data found for any selected metrics in this group.")
+            st.warning(f"No data to forecast for group: {group_name}")
         
-        st.markdown("---")
+        if not generate_csv_only:
+            st.markdown("---")
+
+    # --- MODIFICATION START: Clear the progress bar after the loop ---
+    progress_container.empty()
+    # --- MODIFICATION END ---
 
     if all_results_for_csv:
         st.header("Download All Forecasts")
-        all_df = pd.concat(all_results_for_csv, ignore_index=True)
-        all_df['actual_qty'] = all_df['actual_qty'].fillna(-1).astype(int).replace(-1, pd.NA)
+        final_df = pd.concat(all_results_for_csv, ignore_index=True)
         
-        id_cols = ['target_metric'] + group_cols
-        time_cols = ['ds', 'actual_qty', 'forecast_qty']
-        final_cols = id_cols + [c for c in time_cols if c in all_df.columns]
-        all_df = all_df[final_cols]
+        id_cols = group_cols + [date_column]
+        value_cols_ordered = []
+        for metric in value_columns:
+            actual_col = f'{metric}_actual'
+            forecast_col = f'{metric}_forecast'
+            
+            if actual_col in final_df.columns:
+                final_df[actual_col] = final_df[actual_col].fillna(-1).astype(int).replace(-1, pd.NA)
+                value_cols_ordered.append(actual_col)
+            
+            if forecast_col in final_df.columns:
+                value_cols_ordered.append(forecast_col)
+
+        final_df = final_df.rename(columns={'ds': date_column})
         
-        st.dataframe(all_df)
-        csv_bytes = all_df.to_csv(index=False).encode('utf-8')
-        st.download_button("Download All Forecasts as CSV", data=csv_bytes, file_name="multi_target_forecasts.csv", mime="text/csv")
+        final_cols = id_cols + value_cols_ordered
+        final_cols_exist = [col for col in final_cols if col in final_df.columns]
+        final_df = final_df[final_cols_exist]
+
+        st.dataframe(final_df, use_container_width=True)
+        csv_bytes = final_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "Download All Forecasts as CSV", 
+            data=csv_bytes, 
+            file_name="multi_target_forecasts_wide.csv", 
+            mime="text/csv"
+        )
